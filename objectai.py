@@ -1,170 +1,86 @@
-import base64
-from threading import Lock, Thread
 import cv2
-import openai
-from cv2 import VideoCapture, imencode
-from dotenv import load_dotenv
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.schema.messages import SystemMessage
-from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain_openai import ChatOpenAI
-from google.cloud import aiplatform
-from pyaudio import PyAudio, paInt16
-from speech_recognition import Microphone, Recognizer, UnknownValueError
+import numpy as np
+#CAN DETECT REAL-TIME OBJECTS BUT REQUIRES THE CFG, WEIGHTS, COCO TO BE INSTALLED.
+def real_time_object_detection():  # ALL 3 MUST BE DOWNLOADED
+    config_file = r"D:\Python Ai Project\yolo_files\yolov4.cfg"
+    weights_file = r"D:\Python Ai Project\yolo_files\yolov4.weights"
+    classes_file = r"D:\Python Ai Project\yolo_files\coco.names"
 
-load_dotenv()
+    # Load the YOLO model
+    net = cv2.dnn.readNet(weights_file, config_file)
 
+    # Load class labels
+    with open(classes_file, 'r') as f:
+        classes = [line.strip() for line in f.readlines()]
 
-class :
-    def __init__(self):
-        self.stream = VideoCapture(index=0)
-        _, self.frame = self.stream.read()
-        self.running = False
-        self.lock = Lock()
+    # Start video capture (0 for the default camera)
+    video = cv2.VideoCapture(0)
 
-    def start(self):
-        if self.running:
-            return self
+    if not video.isOpened():
+        print("Error: Could not open video.")
+        return
 
-        self.running = True
+    while True:
+        ret, frame = video.read()
+        if not ret:
+            print("Error: Failed to capture video frame.")
+            break
 
-        self.thread = Thread(target=self.update, args=())
-        self.thread.start()
-        return self
+        # Prepare the frame for detection
+        blob = cv2.dnn.blobFromImage(frame, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
+        net.setInput(blob)
 
-    def update(self):
-        while self.running:
-            _, frame = self.stream.read()
+        layer_names = net.getLayerNames()
+        unconnected_out_layers = net.getUnconnectedOutLayers()
+        output_layers = [layer_names[i - 1] for i in unconnected_out_layers]
 
-            self.lock.acquire()
-            self.frame = frame
-            self.lock.release()
+        outs = net.forward(output_layers)
 
-    def read(self, encode=False):
-        self.lock.acquire()
-        frame = self.frame.copy()
-        self.lock.release()
+        # Process the outputs and draw bounding boxes
+        class_ids, confidences, boxes = [], [], []
+        height, width, _ = frame.shape
 
-        if encode:
-            _, buffer = imencode(".jpeg", frame)
-            return base64.b64encode(buffer)
+        for out in outs:
+            for detection in out:
+                scores = detection[5:]
+                class_id = np.argmax(scores)
+                confidence = scores[class_id]
+                if confidence > 0.25:
+                    center_x = int(detection[0] * width)
+                    center_y = int(detection[1] * height)
+                    w = int(detection[2] * width)
+                    h = int(detection[3] * height)
+                    x = int(center_x - w / 2)
+                    y = int(center_y - h / 2)
+                    boxes.append([x, y, w, h])
+                    confidences.append(float(confidence))
+                    class_ids.append(class_id)
 
-        return frame
+        indexes = cv2.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
+        mobile_detected = False  # Flag to track mobile detection
 
-    def stop(self):
-        self.running = False
-        if self.thread.is_alive():
-            self.thread.join()
+        for i in range(len(boxes)):
+            if i in indexes:
+                x, y, w, h = boxes[i]
+                label = classes[class_ids[i]]  # Use class label
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.putText(frame, label, (x, y + 30), cv2.FONT_HERSHEY_PLAIN, 3, (0, 255, 0), 3)
 
-    def __exit__(self, exc_type, exc_value, exc_traceback):
-        self.stream.release()
-WebcamStream
+                # Check if the detected object is a mobile device
+                if label == "cell phone":  # Check for the specific class name
+                    mobile_detected = True  # Set flag if mobile device is detected
 
-class Assistant:
-    def __init__(self, model):
-        self.chain = self._create_inference_chain(model)
+        cv2.imshow("Real-Time Object Detection", frame)
 
-    def answer(self, prompt, image):
-        if not prompt:
-            return
+        if mobile_detected:
+            print("Mobile device detected")  # Output message to terminal
+            break  # Exit the loop
 
-        print("Prompt:", prompt)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-        response = self.chain.invoke(
-            {"prompt": prompt, "image_base64": image.decode()},
-            config={"configurable": {"session_id": "unused"}},
-        ).strip()
+    video.release()
+    cv2.destroyAllWindows()
 
-        print("Response:", response)
-
-        if response:
-            self._tts(response)
-
-    def _tts(self, response):
-        player = PyAudio().open(format=paInt16, channels=1, rate=24000, output=True)
-
-        with openai.audio.speech.with_streaming_response.create(
-            model="tts-1",
-            voice="alloy",
-            response_format="pcm",
-            input=response,
-        ) as stream:
-            for chunk in stream.iter_bytes(chunk_size=1024):
-                player.write(chunk)
-
-    def _create_inference_chain(self, model):
-        SYSTEM_PROMPT = """
-        You are a witty assistant that will use the chat history and the image 
-        provided by the user to answer its questions.
-
-        Use few words on your answers. Go straight to the point. Do not use any
-        emoticons or emojis. Do not ask the user any questions.
-
-        Be friendly and helpful. Show some personality. Do not be too formal.
-        """
-
-        prompt_template = ChatPromptTemplate.from_messages(
-            [
-                SystemMessage(content=SYSTEM_PROMPT),
-                MessagesPlaceholder(variable_name="chat_history"),
-                (
-                    "human",
-                    [
-                        {"type": "text", "text": "{prompt}"},
-                        {
-                            "type": "image_url",
-                            "image_url": "data:image/jpeg;base64,{image_base64}",
-                        },
-                    ],
-                ),
-            ]
-        )
-
-        chain = prompt_template | model | StrOutputParser()
-
-        chat_message_history = ChatMessageHistory()
-        return RunnableWithMessageHistory(
-            chain,
-            lambda _: chat_message_history,
-            input_messages_key="prompt",
-            history_messages_key="chat_history",
-        )
-
-
-webcam_stream = WebcamStream().start()
-
-model = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest")
-
-# You can use OpenAI's GPT-4o model instead of Gemini Flash
-# by uncommenting the following line:
-# model = ChatOpenAI(model="gpt-4o")
-
-assistant = Assistant(model)
-
-
-def audio_callback(recognizer, audio):
-    try:
-        prompt = recognizer.recognize_whisper(audio, model="base", language="english")
-        assistant.answer(prompt, webcam_stream.read(encode=True))
-
-    except UnknownValueError:
-        print("There was an error processing the audio.")
-
-
-recognizer = Recognizer()
-microphone = Microphone()
-with microphone as source:
-    recognizer.adjust_for_ambient_noise(source)
-
-stop_listening = recognizer.listen_in_background(microphone, audio_callback)
-
-while True:
-    cv2.imshow("webcam", webcam_stream.read())
-    if cv2.waitKey(1) in [27, ord("q")]:
-        break
-
-webcam_stream.stop()
-cv2.destroyAllWindows()
-stop_listening(wait_for_stop=False)
+if __name__ == "__main__":
+    real_time_object_detection()
